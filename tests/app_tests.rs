@@ -583,6 +583,182 @@ async fn filtering_and_partial_reloads_return_expected_subsets() {
         .missing("counts");
 }
 
+async fn get_page(app: &Router, uri: &str, cookie: Option<&str>) -> TestResponse {
+    let mut builder = inertia_request("GET", uri);
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+    send(app, builder.body(Body::empty()).unwrap()).await
+}
+
+#[tokio::test]
+async fn distinct_list_names_sharing_a_slug_are_all_created() {
+    let app = setup_app().await;
+
+    // Every one of these slugifies to either "work" or the "list" fallback.
+    for name in ["Work", "Work!", "日本語", "Привет", "🛒"] {
+        let response = send(
+            &app,
+            json_visit("POST", "/lists", None, Some("/"), json!({ "name": name })),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::FOUND);
+        assert!(
+            response.header("location").unwrap().starts_with("/?list="),
+            "list {name:?} should have been created"
+        );
+    }
+
+    let page = get_page(&app, "/", None).await.page();
+    page.has_count("lists", 5);
+
+    let slugs: Vec<String> = page
+        .prop("lists")
+        .and_then(|lists| lists.as_array().cloned())
+        .unwrap()
+        .iter()
+        .map(|list| list["slug"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(slugs, ["work", "work-2", "list", "list-2", "list-3"]);
+}
+
+#[tokio::test]
+async fn deleting_a_list_that_is_not_in_view_keeps_the_current_page() {
+    let app = setup_app().await;
+
+    let create = send(
+        &app,
+        json_visit("POST", "/lists", None, Some("/"), json!({ "name": "Errands" })),
+    )
+    .await;
+    let cookie = create.session_cookie();
+    let list_id: i64 = create
+        .header("location")
+        .unwrap()
+        .trim_start_matches("/?list=")
+        .parse()
+        .unwrap();
+
+    let referer = "http://localhost/?view=today&sort=due_date&search=milk";
+    let delete = send(
+        &app,
+        inertia_request("DELETE", &format!("/lists/{list_id}"))
+            .header(header::COOKIE, &cookie)
+            .header(header::REFERER, referer)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(delete.status, StatusCode::SEE_OTHER);
+    assert_eq!(delete.header("location"), Some(referer));
+    get_page(&app, "/", Some(&cookie)).await.page().has_count("lists", 0);
+}
+
+#[tokio::test]
+async fn malformed_due_dates_are_rejected() {
+    let app = setup_app().await;
+
+    for due_date in ["2026-+1-+5", "+026-01-05", "2026-02-30", "2026/01/05"] {
+        let response = send(
+            &app,
+            json_visit(
+                "POST",
+                "/todos",
+                None,
+                Some("/"),
+                json!({ "title": "Bad date", "dueDate": due_date }),
+            ),
+        )
+        .await;
+        let cookie = response.session_cookie();
+
+        get_page(&app, "/", Some(&cookie))
+            .await
+            .page()
+            .equals("errors.dueDate", "Due date must be a valid YYYY-MM-DD date.")
+            .has_count("todos", 0);
+    }
+}
+
+#[tokio::test]
+async fn unparseable_list_filter_falls_back_to_all_tasks() {
+    let app = setup_app().await;
+
+    for uri in ["/?list=abc", "/?list=", "/?list=1.5&sort=newest"] {
+        let response = get_page(&app, uri, None).await;
+        assert_eq!(response.status, StatusCode::OK, "GET {uri}");
+        response
+            .page()
+            .component("Todos/Index")
+            .equals("filters.view", "all")
+            .equals("filters.list", serde_json::Value::Null);
+    }
+}
+
+#[tokio::test]
+async fn smart_sort_puts_due_work_first_while_priority_sort_does_not() {
+    let pool = db::connect("sqlite::memory:").await.unwrap();
+    let today = db::today_local(&pool).await.unwrap();
+
+    for (title, priority, due_date) in [
+        ("High, no date", "high", None),
+        ("Low, due today", "low", Some(today.as_str())),
+        ("Medium, long overdue", "medium", Some("2000-01-01")),
+    ] {
+        db::create_todo(
+            &pool,
+            db::TodoInput {
+                title,
+                notes: "",
+                priority,
+                due_date,
+                list_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let app = build_router(
+        AppState { db: pool },
+        ViteAssets::with_paths("target/test-no-hot", "target/test-no-manifest.json", "resources/js/app.tsx"),
+    );
+
+    get_page(&app, "/", None)
+        .await
+        .page()
+        .equals("filters.sort", "smart")
+        .equals("todos.0.title", "Medium, long overdue")
+        .equals("todos.1.title", "Low, due today")
+        .equals("todos.2.title", "High, no date");
+
+    get_page(&app, "/?sort=priority", None)
+        .await
+        .page()
+        .equals("todos.0.title", "High, no date")
+        .equals("todos.1.title", "Medium, long overdue")
+        .equals("todos.2.title", "Low, due today");
+}
+
+#[tokio::test]
+async fn starter_data_is_seeded_only_once() {
+    let pool = db::connect("sqlite::memory:").await.unwrap();
+
+    db::seed_if_empty(&pool).await.unwrap();
+    assert_eq!(db::list_lists(&pool).await.unwrap().len(), 4);
+    assert_eq!(db::get_counts(&pool).await.unwrap().all, 6);
+
+    // The user clears everything out...
+    sqlx::query("DELETE FROM todos").execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM lists").execute(&pool).await.unwrap();
+
+    // ...and the next startup must leave the workspace empty.
+    db::seed_if_empty(&pool).await.unwrap();
+    assert!(db::list_lists(&pool).await.unwrap().is_empty());
+    assert_eq!(db::get_counts(&pool).await.unwrap().all, 0);
+}
+
 #[test]
 fn vite_assets_loads_built_manifest_tags() {
     let vite = ViteAssets::new();

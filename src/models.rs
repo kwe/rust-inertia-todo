@@ -1,4 +1,14 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Read an id from a query string, treating anything unparseable (`?list=`,
+/// `?list=abc`) as absent so a hand-edited URL still renders the page.
+fn lenient_id<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| value.trim().parse().ok()))
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +101,7 @@ impl Toast {
 #[serde(rename_all = "camelCase", default)]
 pub struct IndexQuery {
     pub view: Option<String>,
+    #[serde(deserialize_with = "lenient_id")]
     pub list: Option<i64>,
     pub search: Option<String>,
     pub sort: Option<String>,

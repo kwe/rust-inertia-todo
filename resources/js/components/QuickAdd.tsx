@@ -1,11 +1,12 @@
 import { useForm } from '@inertiajs/react';
 import { Calendar, ChevronDown, FileText, Flag, Folder, Plus, X } from 'lucide-react';
 import { type FormEvent, type RefObject, useEffect, useState } from 'react';
-import { addDaysIso, type Priority, type TodoList } from '../types';
+import { addDaysIso, type Priority, type SmartView, type TodoList } from '../types';
 
 interface QuickAddProps {
   lists: TodoList[];
   activeListId: number | null;
+  view: SmartView;
   today: string;
   inputRef: RefObject<HTMLInputElement | null>;
 }
@@ -16,15 +17,22 @@ const PRIORITY_OPTIONS: { value: Priority; label: string; dot: string }[] = [
   { value: 'high', label: 'High', dot: 'bg-rose-500' },
 ];
 
-export default function QuickAdd({ lists, activeListId, today, inputRef }: QuickAddProps) {
+export default function QuickAdd({ lists, activeListId, view, today, inputRef }: QuickAddProps) {
   const [expanded, setExpanded] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
+
+  const tomorrow = addDaysIso(today, 1);
+
+  // Start from values that keep a new task inside the view it is added from;
+  // otherwise it would be filtered out of sight the moment it is saved.
+  const defaultDueDate = view === 'today' ? today : view === 'upcoming' ? tomorrow : '';
+  const defaultPriority: Priority = view === 'high' ? 'high' : 'medium';
 
   const form = useForm({
     title: '',
     notes: '',
-    priority: 'medium' as Priority,
-    dueDate: '',
+    priority: defaultPriority as Priority,
+    dueDate: defaultDueDate,
     listId: activeListId as number | null,
   });
 
@@ -33,15 +41,23 @@ export default function QuickAdd({ lists, activeListId, today, inputRef }: Quick
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeListId]);
 
-  const tomorrow = addDaysIso(today, 1);
+  useEffect(() => {
+    form.setData((data) => ({ ...data, priority: defaultPriority, dueDate: defaultDueDate }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     form.post('/todos', {
       preserveScroll: true,
       onSuccess: () => {
-        form.reset('title', 'notes', 'dueDate');
-        form.setData('priority', 'medium');
+        form.setData((data) => ({
+          ...data,
+          title: '',
+          notes: '',
+          priority: defaultPriority,
+          dueDate: defaultDueDate,
+        }));
         setShowNotes(false);
       },
     });

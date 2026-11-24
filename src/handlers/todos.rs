@@ -297,6 +297,15 @@ fn is_valid_iso_date(s: &str) -> bool {
         return false;
     }
 
+    // `str::parse` accepts a leading sign ("+1"), so insist on digits only.
+    let all_digits = bytes
+        .iter()
+        .enumerate()
+        .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+    if !all_digits {
+        return false;
+    }
+
     let Ok(year) = s[0..4].parse::<i32>() else {
         return false;
     };
