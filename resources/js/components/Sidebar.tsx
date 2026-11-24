@@ -426,7 +426,7 @@ export default function Sidebar({
                       onClick={() => handleDeleteList(list)}
                       aria-label={`Delete list ${list.name}`}
                       title={`Delete ${list.name}`}
-                      className="hidden rounded-md p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 group-hover:inline-flex focus:inline-flex dark:hover:bg-rose-500/15 dark:hover:text-rose-400"
+                      className="inline-flex rounded-md p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 lg:opacity-0 lg:group-hover:opacity-100 lg:focus-visible:opacity-100 dark:hover:bg-rose-500/15 dark:hover:text-rose-400"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>

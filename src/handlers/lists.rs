@@ -59,7 +59,24 @@ pub async fn destroy(
         inertia.flash("toast", Toast::info("List not found"));
     }
 
-    Ok(inertia::redirect("/").into_response())
+    // Only leave the current page when it was showing the list that is now gone.
+    if inertia.request().referer().is_some_and(|referer| url_filters_by_list(referer, id)) {
+        Ok(inertia::redirect("/").into_response())
+    } else {
+        Ok(inertia.back().into_response())
+    }
+}
+
+fn url_filters_by_list(url: &str, id: i64) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    let query = query.split('#').next().unwrap_or_default();
+
+    query.split('&').any(|pair| {
+        pair.split_once('=')
+            .is_some_and(|(key, value)| key == "list" && value.parse::<i64>() == Ok(id))
+    })
 }
 
 fn is_valid_hex_color(color: &str) -> bool {

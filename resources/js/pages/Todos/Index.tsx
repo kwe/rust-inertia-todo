@@ -52,7 +52,14 @@ export default function TodosIndex({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const quickAddInputRef = useRef<HTMLInputElement>(null);
 
+  // The search term this page last asked the server for. A response that merely
+  // echoes it back must not touch the input: the user may have typed more since.
+  const requestedSearchRef = useRef(filters.search);
+
   useEffect(() => {
+    if (filters.search === requestedSearchRef.current) return;
+    // The search changed for another reason (navigation, redirect): adopt it.
+    requestedSearchRef.current = filters.search;
     setSearchValue(filters.search);
   }, [filters.search]);
 
@@ -99,6 +106,7 @@ export default function TodosIndex({
     if (searchValue.trim() === filters.search) return;
 
     const timer = window.setTimeout(() => {
+      requestedSearchRef.current = searchValue.trim();
       router.get(
         '/',
         buildFilterParams({
@@ -120,6 +128,7 @@ export default function TodosIndex({
   }, [searchValue, filters.search, filters.view, filters.list, filters.sort]);
 
   const handleSortChange = (nextSort: SortMode) => {
+    requestedSearchRef.current = searchValue.trim();
     router.get(
       '/',
       buildFilterParams({
@@ -139,6 +148,7 @@ export default function TodosIndex({
 
   const handleClearSearch = () => {
     setSearchValue('');
+    requestedSearchRef.current = '';
     router.get(
       '/',
       buildFilterParams({
@@ -323,6 +333,7 @@ export default function TodosIndex({
                 <QuickAdd
                   lists={lists}
                   activeListId={filters.list}
+                  view={filters.view}
                   today={today}
                   inputRef={quickAddInputRef}
                 />

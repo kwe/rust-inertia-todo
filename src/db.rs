@@ -21,17 +21,34 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
         .foreign_keys(true)
         .journal_mode(journal_mode);
 
-    let max_connections = if is_memory { 1 } else { 5 };
-    let pool = SqlitePoolOptions::new()
-        .max_connections(max_connections)
-        .connect_with(options)
-        .await?;
+    let pool_options = if is_memory {
+        // An in-memory database lives and dies with its connection, so keep a
+        // single connection open for the lifetime of the pool.
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+    } else {
+        SqlitePoolOptions::new().max_connections(5)
+    };
+    let pool = pool_options.connect_with(options).await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)
 }
 
 pub async fn seed_if_empty(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    // The marker makes seeding a one-time event: a workspace the user has
+    // emptied on purpose must stay empty across restarts.
+    let already_seeded: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM app_meta WHERE key = 'seeded')")
+            .fetch_one(pool)
+            .await?;
+    if already_seeded != 0 {
+        return Ok(());
+    }
+
     let list_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lists")
         .fetch_one(pool)
         .await?;
@@ -40,6 +57,7 @@ pub async fn seed_if_empty(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
     if list_count > 0 || todo_count > 0 {
+        mark_seeded(pool).await?;
         return Ok(());
     }
 
@@ -145,7 +163,19 @@ pub async fn seed_if_empty(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(&mut *tx)
     .await?;
 
+    mark_seeded(&mut *tx).await?;
+
     tx.commit().await?;
+    Ok(())
+}
+
+async fn mark_seeded<'e, E>(executor: E) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
+    sqlx::query("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('seeded', '1')")
+        .execute(executor)
+        .await?;
     Ok(())
 }
 
@@ -245,10 +275,15 @@ pub async fn list_todos(pool: &SqlitePool, filters: &TodoFilters) -> Result<Vec<
             qb.push(" ORDER BY t.completed ASC, t.id DESC");
         }
         _ => {
+            // Smart: anything overdue or due today floats to the top, then priority.
             qb.push(
                 r#"
                 ORDER BY
                     t.completed ASC,
+                    CASE
+                        WHEN t.completed = 0 AND t.due_date IS NOT NULL AND t.due_date <= date('now', 'localtime') THEN 0
+                        ELSE 1
+                    END ASC,
                     CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC,
                     CASE WHEN t.due_date IS NULL THEN 1 ELSE 0 END ASC,
                     t.due_date ASC,
@@ -528,37 +563,81 @@ pub async fn clear_completed(pool: &SqlitePool, list_id: Option<i64>) -> Result<
 pub async fn create_list(
     pool: &SqlitePool,
     name: &str,
-    slug: &str,
+    base_slug: &str,
     color: &str,
 ) -> Result<Result<i64, DuplicateList>, sqlx::Error> {
-    let duplicate: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM lists WHERE LOWER(name) = LOWER(?) OR slug = ?)",
-    )
-    .bind(name)
-    .bind(slug)
-    .fetch_one(pool)
-    .await?;
+    // A concurrent insert can take the slug or position we picked, so retry a
+    // few times before giving up.
+    const MAX_ATTEMPTS: usize = 5;
+    let mut attempt = 0;
 
-    if duplicate != 0 {
-        return Ok(Err(DuplicateList));
+    loop {
+        attempt += 1;
+
+        let duplicate: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lists WHERE LOWER(name) = LOWER(?))")
+                .bind(name)
+                .fetch_one(pool)
+                .await?;
+
+        if duplicate != 0 {
+            return Ok(Err(DuplicateList));
+        }
+
+        let slug = unique_slug(pool, base_slug).await?;
+
+        let next_pos: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), 0) + 1 FROM lists")
+            .fetch_one(pool)
+            .await?;
+
+        let inserted =
+            sqlx::query("INSERT INTO lists (name, slug, color, position) VALUES (?, ?, ?, ?)")
+                .bind(name)
+                .bind(&slug)
+                .bind(color)
+                .bind(next_pos)
+                .execute(pool)
+                .await;
+
+        match inserted {
+            Ok(res) => return Ok(Ok(res.last_insert_rowid())),
+            Err(sqlx::Error::Database(db_err))
+                if db_err.is_unique_violation() && attempt < MAX_ATTEMPTS =>
+            {
+                // Either the name or the slug was taken in the meantime; the
+                // next pass tells the two apart.
+            }
+            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                return Ok(Err(DuplicateList));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Distinct names can share a base slug ("Work" / "Work!", or any two names
+/// without ASCII letters), so disambiguate with a numeric suffix.
+async fn unique_slug(pool: &SqlitePool, base: &str) -> Result<String, sqlx::Error> {
+    let taken: std::collections::HashSet<String> =
+        sqlx::query_scalar::<_, String>("SELECT slug FROM lists WHERE slug = ? OR slug LIKE ? || '-%'")
+            .bind(base)
+            .bind(base)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+
+    if !taken.contains(base) {
+        return Ok(base.to_owned());
     }
 
-    let next_pos: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), 0) + 1 FROM lists")
-        .fetch_one(pool)
-        .await?;
-
-    let inserted = sqlx::query("INSERT INTO lists (name, slug, color, position) VALUES (?, ?, ?, ?)")
-        .bind(name)
-        .bind(slug)
-        .bind(color)
-        .bind(next_pos)
-        .execute(pool)
-        .await;
-
-    match inserted {
-        Ok(res) => Ok(Ok(res.last_insert_rowid())),
-        Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Ok(Err(DuplicateList)),
-        Err(err) => Err(err),
+    let mut suffix = 2_u64;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !taken.contains(&candidate) {
+            return Ok(candidate);
+        }
+        suffix += 1;
     }
 }
 
