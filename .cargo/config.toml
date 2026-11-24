@@ -1,0 +1,2 @@
+[registries.pilot]
+index = "sparse+https://pilot.laravel.cloud/cargo/index/"
