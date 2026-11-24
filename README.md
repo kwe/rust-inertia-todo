@@ -2,6 +2,17 @@
 
 A modern full-stack Todo application built with **Rust**, **Axum 0.8**, **SQLite (`sqlx`)**, **[`inertia-laravel-rust`](https://github.com/inertiajs/inertia-laravel-rust)** (Inertia v3 protocol), **React 19**, **TypeScript**, and **Tailwind CSS v4**.
 
+## Screenshots
+
+### Light Mode — Workspace, Smart Views & Deferred Insights
+![Taskflow light mode workspace](docs/screenshots/light-mode.png)
+
+### Dark Mode — Expanded Quick-Add Options
+![Taskflow dark mode with expanded quick-add options](docs/screenshots/dark-mode.png)
+
+### Task Editor Modal
+![Taskflow edit task modal](docs/screenshots/edit-modal.png)
+
 ## Features
 
 - **Server-driven SPA via Inertia v3** — Axum routes render React pages directly without a separate REST/GraphQL API or client-side router.
